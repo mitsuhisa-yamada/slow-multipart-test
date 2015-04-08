@@ -4,7 +4,6 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.SocketException;
 import java.net.URL;
@@ -127,7 +126,7 @@ public class SlowMultipartTest implements Runnable {
         try {
             reader = new BufferedReader(new FileReader(new File(fileName)));
 
-            long sleepMs = minSleepMs + (long)((maxSleepMs - minSleepMs) * Math.random());
+            long sleep = minSleepMs + (long)((maxSleepMs - minSleepMs) * Math.random());
             long start = System.nanoTime();
 
             URL url = new URL(targetUrl);
@@ -144,7 +143,7 @@ public class SlowMultipartTest implements Runnable {
             outputStream.writeBytes(EOL);
             outputStream.flush();
 
-            long clientSleep = 0;
+            long totalSleep = 0;
             char[] buffer = new char[bufferBytes];
             int len;
             while ((len = reader.read(buffer, 0, bufferBytes)) >= 0) {
@@ -154,8 +153,8 @@ public class SlowMultipartTest implements Runnable {
                 }
                 outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
                 outputStream.flush();
-                Thread.sleep(sleepMs);
-                clientSleep += sleepMs;
+                Thread.sleep(sleep);
+                totalSleep += sleep;
             }
 
             outputStream.writeBytes(EOL);
@@ -165,13 +164,11 @@ public class SlowMultipartTest implements Runnable {
             int responseCode = connection.getResponseCode();
             long finish = System.nanoTime();
 
-            long serverSleep = 0;
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                serverSleep = getSleepFromResponse(connection);
                 ok = true;
             }
             synchronized(timeRecorder) {
-                timeRecorder.record(finish - start, clientSleep, serverSleep);
+                timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
             }
         } catch (SocketException | TimeoutException e) {
             // ignore
@@ -212,12 +209,12 @@ public class SlowMultipartTest implements Runnable {
                         parallelism, count, okCount, (int)time, qps);
             }
             System.out.printf("Avg: %dms (non-sleep: %dms), Max: %dms (non-sleep: %dms), Min: %dms (non-sleep: %dms)\n\n",
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getTotalAvg()),
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getActiveAvg()),
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getTotalMax()),
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getActiveMax()),
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getTotalMin()),
-                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getActiveMin()));
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getAvg()),
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getNonSleepAvg()),
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getMax()),
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getNonSleepMax()),
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getMin()),
+                    TimeUnit.NANOSECONDS.toMillis(timeRecorder.getNonSleepMin()));
         }
         System.out.flush();
         prevCount = count;
@@ -253,18 +250,6 @@ public class SlowMultipartTest implements Runnable {
             }
         }
         return list;
-    }
-
-    private static long getSleepFromResponse(HttpURLConnection connection) {
-        long sleep = 0;
-        try {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
-            String body = reader.readLine();
-            sleep = Long.parseLong(body.split("(: |ms)")[1]);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return sleep;
     }
 
     private String targetUrl = null;

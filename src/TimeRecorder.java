@@ -1,50 +1,50 @@
 public class TimeRecorder {
-    public void record(long totalNs, long clientSleepMs, long serverSleepMs) {
+    public void record(long totalNs, long sleepNs) {
         count++;
 
-        totalSum += totalNs;
-        totalMin = (totalMin < 0) ? totalNs : Math.min(totalMin, totalNs);
-        totalMax = Math.max(totalMax, totalNs);
+        sum += totalNs;
+        min = (min < 0) ? totalNs : Math.min(min, totalNs);
+        max = Math.max(max, totalNs);
 
-        long active = totalNs - (clientSleepMs + serverSleepMs) * 1000000;
-        activeSum += active;
-        activeMin = (activeMin < 0) ? active : Math.min(activeMin, active);
-        activeMax = Math.max(activeMax, active);
+        long nonSleep = totalNs - sleepNs;
+        nonSleepSum += nonSleep;
+        nonSleepMin = (nonSleepMin < 0) ? nonSleep : Math.min(nonSleepMin, nonSleep);
+        nonSleepMax = Math.max(nonSleepMax, nonSleep);
     }
 
     public int getCount() {
         return count;
     }
 
-    public long getTotalAvg() {
-        return (count > 0) ? totalSum / count : 0;
+    public long getAvg() {
+        return (count > 0) ? sum / count : 0;
     }
 
-    public long getTotalMin() {
-        return totalMin;
+    public long getMin() {
+        return min;
     }
 
-    public long getTotalMax() {
-        return totalMax;
+    public long getMax() {
+        return max;
     }
 
-    public long getActiveAvg() {
-        return (count > 0) ? activeSum / count : 0;
+    public long getNonSleepAvg() {
+        return (count > 0) ? nonSleepSum / count : 0;
     }
 
-    public long getActiveMin() {
-        return activeMin;
+    public long getNonSleepMin() {
+        return nonSleepMin;
     }
 
-    public long getActiveMax() {
-        return activeMax;
+    public long getNonSleepMax() {
+        return nonSleepMax;
     }
 
     private int count = 0;
-    private long totalSum = 0;
-    private long totalMin = -1;
-    private long totalMax = 0;
-    private long activeSum = 0;
-    private long activeMin = -1;
-    private long activeMax = 0;
+    private long sum = 0;
+    private long min = -1;
+    private long max = 0;
+    private long nonSleepSum = 0;
+    private long nonSleepMin = -1;
+    private long nonSleepMax = 0;
 }
