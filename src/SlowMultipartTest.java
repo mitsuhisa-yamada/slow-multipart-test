@@ -78,11 +78,7 @@ public class SlowMultipartTest implements Runnable {
         }
         int size = fileNameList.size();
         while (System.currentTimeMillis() - startTime < testTimeMs) {
-            if (postFile(fileNameList.get((int)(size * Math.random())))) {
-                synchronized(okCount) {
-                    okCount++;
-                }
-            }
+            postFile(fileNameList.get((int)(size * Math.random())));
         }
     }
 
@@ -114,12 +110,11 @@ public class SlowMultipartTest implements Runnable {
         }
     }
 
-    private boolean postFile(String fileName) {
+    private void postFile(String fileName) {
         if (targetUrl == null || targetUrl.isEmpty() || fileName == null || fileName.isEmpty()) {
-            return false;
+            return;
         }
 
-        boolean ok = false;
         BufferedReader reader = null;
         HttpURLConnection connection = null;
         DataOutputStream outputStream = null;
@@ -165,14 +160,20 @@ public class SlowMultipartTest implements Runnable {
             long finish = System.nanoTime();
 
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                ok = true;
+                synchronized(okCount) {
+                    okCount++;
+                }
             }
             synchronized(timeRecorder) {
                 timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
             }
         } catch (SocketException | TimeoutException e) {
             // ignore
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
+            synchronized(sendErrorCount) {
+                sendErrorCount++;
+            }
+        } catch (InterruptedException e) {
             e.printStackTrace();
         } finally {
             try {
@@ -189,7 +190,6 @@ public class SlowMultipartTest implements Runnable {
                 e.printStackTrace();
             }
         }
-        return ok;
     }
 
     private int prevCount = 0;
@@ -201,12 +201,12 @@ public class SlowMultipartTest implements Runnable {
             count = timeRecorder.getCount();
             if (finish) {
                 double qps = count / time;
-                System.out.printf("Parallelism: %d, Count: %d (OK: %d), Time: %fs, Total QPS: %f\n",
-                        parallelism, count, okCount, time, qps);
+                System.out.printf("Parallelism: %d, Response: %d (OK: %d), Send Error: %d, Time: %fs, Total QPS: %f\n",
+                        parallelism, count, okCount, sendErrorCount, time, qps);
             } else {
                 double qps = (count - prevCount) / (time - prevTime);
-                System.out.printf("Parallelism: %d, Count: %d (OK: %d), Time: %ds, Current QPS: %f\n",
-                        parallelism, count, okCount, (int)time, qps);
+                System.out.printf("Parallelism: %d, Response: %d (OK: %d), Send Error: %d, Time: %ds, Current QPS: %f\n",
+                        parallelism, count, okCount, sendErrorCount, (int)time, qps);
             }
             System.out.printf("Avg: %dms (non-sleep: %dms), Max: %dms (non-sleep: %dms), Min: %dms (non-sleep: %dms)\n\n",
                     TimeUnit.NANOSECONDS.toMillis(timeRecorder.getAvg()),
@@ -263,4 +263,5 @@ public class SlowMultipartTest implements Runnable {
     private long startTime = 0;
     private TimeRecorder timeRecorder = new TimeRecorder();
     private Integer okCount = 0;
+    private Integer sendErrorCount = 0;
 }
