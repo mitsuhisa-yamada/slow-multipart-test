@@ -5,7 +5,7 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.HttpURLConnection;
-import java.net.SocketException;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
@@ -132,48 +132,67 @@ public class SlowMultipartTest implements Runnable {
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + BOUNDARY);
 
-            outputStream = new DataOutputStream(connection.getOutputStream());
-            outputStream.writeBytes(HYPHENS + BOUNDARY + EOL);
-            outputStream.writeBytes("Content-Disposition: form-data; name=\"" + NAME + "\"; filename=\"" + fileName + "\"" + EOL);
-            outputStream.writeBytes(EOL);
-            outputStream.flush();
-
             long totalSleep = 0;
-            char[] buffer = new char[bufferBytes];
-            int len;
-            while ((len = reader.read(buffer, 0, bufferBytes)) >= 0) {
-                if (System.currentTimeMillis() - startTime >= testTimeMs) {
-                    reader.close();
-                    throw new TimeoutException();
-                }
-                outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
+            boolean exception = false;
+            outputStream = new DataOutputStream(connection.getOutputStream());
+            try {
+                outputStream.writeBytes(HYPHENS + BOUNDARY + EOL);
+                outputStream.writeBytes("Content-Disposition: form-data; name=\"" + NAME + "\"; filename=\"" + fileName + "\"" + EOL);
+                outputStream.writeBytes(EOL);
                 outputStream.flush();
-                Thread.sleep(sleep);
-                totalSleep += sleep;
+
+                char[] buffer = new char[bufferBytes];
+                for (;;) {
+                    int len = 0;
+                    try {
+                        if ((len = reader.read(buffer, 0, bufferBytes)) < 0) {
+                            break;
+                        }
+                        if (System.currentTimeMillis() - startTime >= testTimeMs) {
+                            reader.close();
+                            throw new TimeoutException();
+                        }
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        exception = true;
+                        break;
+                    }
+                    outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
+                    outputStream.flush();
+                    Thread.sleep(sleep);
+                    totalSleep += sleep;
+                }
+
+                outputStream.writeBytes(EOL);
+                outputStream.writeBytes(HYPHENS + BOUNDARY + HYPHENS + EOL);
+                outputStream.flush();
+            } catch (IOException e) {
+                synchronized(sendErrorCount) {
+                    sendErrorCount++;
+                }
+                exception = true;
             }
 
-            outputStream.writeBytes(EOL);
-            outputStream.writeBytes(HYPHENS + BOUNDARY + HYPHENS + EOL);
-            outputStream.flush();
+            if (!exception) {
+                int responseCode = connection.getResponseCode();
+                long finish = System.nanoTime();
 
-            int responseCode = connection.getResponseCode();
-            long finish = System.nanoTime();
-
-            if (responseCode == HttpURLConnection.HTTP_OK) {
-                synchronized(okCount) {
-                    okCount++;
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    synchronized(okCount) {
+                        okCount++;
+                    }
+                }
+                synchronized(timeRecorder) {
+                    timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
                 }
             }
-            synchronized(timeRecorder) {
-                timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
-            }
-        } catch (SocketException | TimeoutException e) {
+        } catch (FileNotFoundException e) {
+            System.err.println("File(" + fileName + ") does not exist.");
+        } catch (MalformedURLException e) {
+            System.err.println("URL(" + targetUrl + ") is invalid.");
+        } catch (TimeoutException e) {
             // ignore
-        } catch (IOException e) {
-            synchronized(sendErrorCount) {
-                sendErrorCount++;
-            }
-        } catch (InterruptedException e) {
+        } catch (InterruptedException | IOException e) {
             e.printStackTrace();
         } finally {
             try {
