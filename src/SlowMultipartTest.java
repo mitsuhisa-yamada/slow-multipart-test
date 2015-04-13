@@ -118,6 +118,7 @@ public class SlowMultipartTest implements Runnable {
         BufferedReader reader = null;
         HttpURLConnection connection = null;
         DataOutputStream outputStream = null;
+        boolean sending = false, receiving = false;
         try {
             reader = new BufferedReader(new FileReader(new File(fileName)));
 
@@ -132,81 +133,85 @@ public class SlowMultipartTest implements Runnable {
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + BOUNDARY);
 
-            long totalSleep = 0;
-            boolean exception = false;
             outputStream = new DataOutputStream(connection.getOutputStream());
-            try {
-                outputStream.writeBytes(HYPHENS + BOUNDARY + EOL);
-                outputStream.writeBytes("Content-Disposition: form-data; name=\"" + NAME + "\"; filename=\"" + fileName + "\"" + EOL);
-                outputStream.writeBytes(EOL);
-                outputStream.flush();
+            sending = true;
+            outputStream.writeBytes(HYPHENS + BOUNDARY + EOL);
+            outputStream.writeBytes("Content-Disposition: form-data; name=\"" + NAME + "\"; filename=\"" + fileName + "\"" + EOL);
+            outputStream.writeBytes(EOL);
+            outputStream.flush();
+            sending = false;
 
-                char[] buffer = new char[bufferBytes];
-                for (;;) {
-                    int len = 0;
-                    try {
-                        if ((len = reader.read(buffer, 0, bufferBytes)) < 0) {
-                            break;
-                        }
-                        if (System.currentTimeMillis() - startTime >= testTimeMs) {
-                            reader.close();
-                            throw new TimeoutException();
-                        }
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                        exception = true;
-                        break;
-                    }
-                    outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
-                    outputStream.flush();
-                    Thread.sleep(sleep);
-                    totalSleep += sleep;
+            long totalSleep = 0;
+            char[] buffer = new char[bufferBytes];
+            int len;
+            while ((len = reader.read(buffer, 0, bufferBytes)) >= 0) {
+                if (System.currentTimeMillis() - startTime >= testTimeMs) {
+                    throw new TimeoutException();
                 }
-
-                outputStream.writeBytes(EOL);
-                outputStream.writeBytes(HYPHENS + BOUNDARY + HYPHENS + EOL);
+                sending = true;
+                outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
                 outputStream.flush();
-            } catch (IOException e) {
-                synchronized(sendErrorCount) {
-                    sendErrorCount++;
-                }
-                exception = true;
+                sending = false;
+                Thread.sleep(sleep);
+                totalSleep += sleep;
             }
 
-            if (!exception) {
-                int responseCode = connection.getResponseCode();
-                long finish = System.nanoTime();
+            sending = true;
+            outputStream.writeBytes(EOL);
+            outputStream.writeBytes(HYPHENS + BOUNDARY + HYPHENS + EOL);
+            outputStream.flush();
+            sending = false;
 
-                if (responseCode == HttpURLConnection.HTTP_OK) {
-                    synchronized(okCount) {
-                        okCount++;
-                    }
+            receiving = true;
+            int responseCode = connection.getResponseCode();
+            receiving = false;
+            long finish = System.nanoTime();
+
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                synchronized(okCount) {
+                    okCount++;
                 }
-                synchronized(timeRecorder) {
-                    timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
-                }
+            }
+            synchronized(timeRecorder) {
+                timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
             }
         } catch (FileNotFoundException e) {
             System.err.println("File(" + fileName + ") does not exist.");
         } catch (MalformedURLException e) {
             System.err.println("URL(" + targetUrl + ") is invalid.");
+        } catch (IOException e) {
+            if (sending) {
+                synchronized(sendErrorCount) {
+                    sendErrorCount++;
+                }
+            } else if (receiving) {
+                synchronized(receiveErrorCount) {
+                    receiveErrorCount++;
+                }
+            } else {
+                e.printStackTrace();
+            }
         } catch (TimeoutException e) {
             // ignore
-        } catch (InterruptedException | IOException e) {
+        } catch (InterruptedException e) {
             e.printStackTrace();
         } finally {
-            try {
-                if (outputStream != null) {
+            if (outputStream != null) {
+                try {
                     outputStream.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
                 }
-                if (connection != null) {
-                    connection.disconnect();
-                }
-                if (reader != null) {
+            }
+            if (connection != null) {
+                connection.disconnect();
+            }
+            if (reader != null) {
+                try {
                     reader.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
                 }
-            } catch (IOException e) {
-                e.printStackTrace();
             }
         }
     }
@@ -220,13 +225,15 @@ public class SlowMultipartTest implements Runnable {
             count = timeRecorder.getCount();
             if (finish) {
                 double qps = count / time;
-                System.out.printf("Parallelism: %d, Response: %d (OK: %d), Send Error: %d, Time: %fs, Total QPS: %f\n",
-                        parallelism, count, okCount, sendErrorCount, time, qps);
+                System.out.printf("Parallelism: %d, Time: %fs, Total QPS: %f\n",
+                        parallelism, time, qps);
             } else {
                 double qps = (count - prevCount) / (time - prevTime);
-                System.out.printf("Parallelism: %d, Response: %d (OK: %d), Send Error: %d, Time: %ds, Current QPS: %f\n",
-                        parallelism, count, okCount, sendErrorCount, (int)time, qps);
+                System.out.printf("Parallelism: %d, Time: %ds, Current QPS: %f\n",
+                        parallelism, (int)time, qps);
             }
+            System.out.printf("Response: %d (OK: %d), Send Error: %d, Receive Error: %d\n",
+                    count, okCount, sendErrorCount, receiveErrorCount);
             System.out.printf("Avg: %dms (non-sleep: %dms), Max: %dms (non-sleep: %dms), Min: %dms (non-sleep: %dms)\n\n",
                     TimeUnit.NANOSECONDS.toMillis(timeRecorder.getAvg()),
                     TimeUnit.NANOSECONDS.toMillis(timeRecorder.getNonSleepAvg()),
@@ -260,12 +267,12 @@ public class SlowMultipartTest implements Runnable {
         } catch (IOException e) {
             e.printStackTrace();
         } finally {
-            try {
-                if (reader != null) {
+            if (reader != null) {
+                try {
                     reader.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
                 }
-            } catch (IOException e) {
-                e.printStackTrace();
             }
         }
         return list;
@@ -283,4 +290,5 @@ public class SlowMultipartTest implements Runnable {
     private TimeRecorder timeRecorder = new TimeRecorder();
     private Integer okCount = 0;
     private Integer sendErrorCount = 0;
+    private Integer receiveErrorCount = 0;
 }
