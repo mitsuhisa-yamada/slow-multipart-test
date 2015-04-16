@@ -6,6 +6,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,6 +30,8 @@ public class SlowMultipartTest implements Runnable {
     private static final String DEFAULT_TEST_TIME_SEC = "0";
     private static final String DEFAULT_PARALLELISM = "1";
     private static final String DEFAULT_OUTPUT_INTERVAL_SEC = "1";
+    private static final String DEFAULT_CONNECT_TIMEOUT_MS = "1000";
+    private static final String DEFAULT_READ_TIMEOUT_MS = "1000";
 
     public static void main(String[] args) {
         Options options = new Options();
@@ -40,6 +43,8 @@ public class SlowMultipartTest implements Runnable {
         options.addOption("t", "time", true, "Test time (sec). default: " + DEFAULT_TEST_TIME_SEC);
         options.addOption("p", "parallelism", true, "Parallelism. default: " + DEFAULT_PARALLELISM);
         options.addOption("i", "interval", true, "Output interval (sec). default: " + DEFAULT_OUTPUT_INTERVAL_SEC);
+        options.addOption("c", "connecttimeout", true, "Connect timeout (ms). default: " + DEFAULT_CONNECT_TIMEOUT_MS);
+        options.addOption("r", "readtimeout", true, "Read timeout (ms). default: " + DEFAULT_READ_TIMEOUT_MS);
 
         try {
             BasicParser parser = new BasicParser();
@@ -54,6 +59,8 @@ public class SlowMultipartTest implements Runnable {
             test.testTimeMs = TimeUnit.SECONDS.toMillis(Long.parseLong(commandLine.getOptionValue("t", DEFAULT_TEST_TIME_SEC)));
             test.parallelism = Math.max(1, Integer.parseInt(commandLine.getOptionValue("p", DEFAULT_PARALLELISM)));
             test.outputIntervalMs = TimeUnit.SECONDS.toMillis(Long.parseLong(commandLine.getOptionValue("i", DEFAULT_OUTPUT_INTERVAL_SEC)));
+            test.connectTimeoutMs = Integer.parseInt(commandLine.getOptionValue("c", DEFAULT_CONNECT_TIMEOUT_MS));
+            test.readTimeoutMs = Integer.parseInt(commandLine.getOptionValue("r", DEFAULT_READ_TIMEOUT_MS));
 
             if (test.targetUrl == null || test.targetUrl.isEmpty()) {
                 System.err.println("ERROR: Target URL (-u,--url) is empty.");
@@ -93,10 +100,13 @@ public class SlowMultipartTest implements Runnable {
                 threadList.get(i).start();
             }
             if (outputIntervalMs > 0) {
-                Thread.sleep(outputIntervalMs);
-                while (System.currentTimeMillis() - startTime < testTimeMs) {
+                long timespent = System.currentTimeMillis() - startTime;
+                long timeleft = testTimeMs - timespent;
+                while (timeleft > 0) {
+                    Thread.sleep(Math.min(outputIntervalMs - timespent % outputIntervalMs, timeleft));
                     outputTimeRecord(false);
-                    Thread.sleep(outputIntervalMs);
+                    timespent = System.currentTimeMillis() - startTime;
+                    timeleft = testTimeMs - timespent;
                 }
             }
             outputTimeRecord(true);
@@ -118,7 +128,7 @@ public class SlowMultipartTest implements Runnable {
         BufferedReader reader = null;
         HttpURLConnection connection = null;
         DataOutputStream outputStream = null;
-        boolean sending = false, receiving = false;
+        boolean connecting = false, writing = false, reading = false;
         try {
             reader = new BufferedReader(new FileReader(new File(fileName)));
 
@@ -130,16 +140,20 @@ public class SlowMultipartTest implements Runnable {
             connection.setUseCaches(false);
             connection.setDoOutput(true);
             connection.setChunkedStreamingMode(bufferBytes);
+            connection.setConnectTimeout(connectTimeoutMs);
+            connection.setReadTimeout(readTimeoutMs);
             connection.setRequestMethod("POST");
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + BOUNDARY);
 
+            connecting = true;
             outputStream = new DataOutputStream(connection.getOutputStream());
-            sending = true;
+            connecting = false;
+            writing = true;
             outputStream.writeBytes(HYPHENS + BOUNDARY + EOL);
             outputStream.writeBytes("Content-Disposition: form-data; name=\"" + NAME + "\"; filename=\"" + fileName + "\"" + EOL);
             outputStream.writeBytes(EOL);
             outputStream.flush();
-            sending = false;
+            writing = false;
 
             long totalSleep = 0;
             char[] buffer = new char[bufferBytes];
@@ -148,45 +162,59 @@ public class SlowMultipartTest implements Runnable {
                 if (System.currentTimeMillis() - startTime >= testTimeMs) {
                     throw new TimeoutException();
                 }
-                sending = true;
+                writing = true;
                 outputStream.write(String.valueOf(buffer).getBytes(), 0, len);
                 outputStream.flush();
-                sending = false;
+                writing = false;
                 Thread.sleep(sleep);
                 totalSleep += sleep;
             }
 
-            sending = true;
+            writing = true;
             outputStream.writeBytes(EOL);
             outputStream.writeBytes(HYPHENS + BOUNDARY + HYPHENS + EOL);
             outputStream.flush();
-            sending = false;
+            writing = false;
 
-            receiving = true;
+            reading = true;
             int responseCode = connection.getResponseCode();
-            receiving = false;
+            reading = false;
             long finish = System.nanoTime();
 
-            if (responseCode == HttpURLConnection.HTTP_OK) {
-                synchronized(okCount) {
-                    okCount++;
-                }
-            }
             synchronized(timeRecorder) {
                 timeRecorder.record(finish - start, TimeUnit.MILLISECONDS.toNanos(totalSleep));
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    okCount++;
+                }
             }
         } catch (FileNotFoundException e) {
             System.err.println("File(" + fileName + ") does not exist.");
         } catch (MalformedURLException e) {
             System.err.println("URL(" + targetUrl + ") is invalid.");
-        } catch (IOException e) {
-            if (sending) {
-                synchronized(sendErrorCount) {
-                    sendErrorCount++;
+        } catch (SocketTimeoutException e) {
+            if (connecting) {
+                synchronized(connectTimeoutCount) {
+                    connectTimeoutCount++;
                 }
-            } else if (receiving) {
-                synchronized(receiveErrorCount) {
-                    receiveErrorCount++;
+            } else if (reading) {
+                synchronized(readTimeoutCount) {
+                    readTimeoutCount++;
+                }
+            } else {
+                e.printStackTrace();
+            }
+        } catch (IOException e) {
+            if (connecting) {
+                synchronized(connectErrorCount) {
+                    connectErrorCount++;
+                }
+            } else if (writing) {
+                synchronized(writeErrorCount) {
+                    writeErrorCount++;
+                }
+            } else if (reading) {
+                synchronized(readErrorCount) {
+                    readErrorCount++;
                 }
             } else {
                 e.printStackTrace();
@@ -225,15 +253,15 @@ public class SlowMultipartTest implements Runnable {
             count = timeRecorder.getCount();
             if (finish) {
                 double qps = count / time;
-                System.out.printf("Parallelism: %d, Time: %fs, Total QPS: %f\n",
-                        parallelism, time, qps);
+                System.out.printf("Parallelism: %d, Time: %ds, Total QPS: %f\n",
+                        parallelism, (int)time, qps);
             } else {
                 double qps = (count - prevCount) / (time - prevTime);
                 System.out.printf("Parallelism: %d, Time: %ds, Current QPS: %f\n",
                         parallelism, (int)time, qps);
             }
-            System.out.printf("Response: %d (OK: %d), Send Error: %d, Receive Error: %d\n",
-                    count, okCount, sendErrorCount, receiveErrorCount);
+            System.out.printf("Response: %d (OK: %d), Connect Error: %d, Write Error: %d, Read Error: %d, Connect Timeout: %d, Read Timeout: %d\n",
+                    count, okCount, connectErrorCount, writeErrorCount, readErrorCount, connectTimeoutCount, readTimeoutCount);
             System.out.printf("Avg: %dms (non-sleep: %dms), Max: %dms (non-sleep: %dms), Min: %dms (non-sleep: %dms)\n\n",
                     TimeUnit.NANOSECONDS.toMillis(timeRecorder.getAvg()),
                     TimeUnit.NANOSECONDS.toMillis(timeRecorder.getNonSleepAvg()),
@@ -286,9 +314,14 @@ public class SlowMultipartTest implements Runnable {
     private long testTimeMs = 0;
     private int parallelism = 0;
     private long outputIntervalMs = 0;
+    private int connectTimeoutMs = 0;
+    private int readTimeoutMs = 0;
     private long startTime = 0;
     private TimeRecorder timeRecorder = new TimeRecorder();
-    private Integer okCount = 0;
-    private Integer sendErrorCount = 0;
-    private Integer receiveErrorCount = 0;
+    private int okCount = 0;
+    private Integer connectErrorCount = 0;
+    private Integer writeErrorCount = 0;
+    private Integer readErrorCount = 0;
+    private Integer connectTimeoutCount = 0;
+    private Integer readTimeoutCount = 0;
 }
